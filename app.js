@@ -1,876 +1,1132 @@
 'use strict';
 /**
  * FairShare – app.js
- * ─────────────────────────────────────────────────────────────
- * Modules:
- *  DB        – localStorage persistence
- *  Store     – in-memory data + computed balances
- *  UI        – page routing, modal management, rendering
- *  App       – business logic (save/delete expense, settle, etc.)
- *  Reminders – recurring expense scheduler
+ * ─────────────────────────────────────────────────────────
+ * DB       : localStorage persistence
+ * Store    : single source of truth for all data
+ * Calc     : all balance calculations (no mistakes)
+ * Nav      : page routing + back stack
+ * Render   : all DOM rendering
+ * Modals   : modal open/close + form population
+ * Actions  : save friend, bill, group, settle, etc.
  */
 
-/* ══════════════════════════════════════════════════════════════
-   CONSTANTS
-══════════════════════════════════════════════════════════════ */
-const CATEGORIES = [
-  { id: 'food',      label: 'Food',      icon: '🍔' },
-  { id: 'travel',    label: 'Travel',    icon: '✈️' },
-  { id: 'stay',      label: 'Stay',      icon: '🏨' },
-  { id: 'drinks',    label: 'Drinks',    icon: '🍺' },
-  { id: 'shopping',  label: 'Shopping',  icon: '🛍️' },
-  { id: 'fuel',      label: 'Fuel',      icon: '⛽' },
-  { id: 'bills',     label: 'Bills',     icon: '📄' },
-  { id: 'rent',      label: 'Rent',      icon: '🏠' },
-  { id: 'ent',       label: 'Fun',       icon: '🎬' },
-  { id: 'other',     label: 'Other',     icon: '📦' },
-];
-
-const GROUP_TYPES = [
-  { id: 'trip',      label: 'Trip',   icon: '✈️' },
-  { id: 'home',      label: 'Home',   icon: '🏠' },
-  { id: 'couple',    label: 'Couple', icon: '💑' },
-  { id: 'work',      label: 'Work',   icon: '💼' },
-  { id: 'other',     label: 'Other',  icon: '👥' },
-];
+/* ══════════════════════════════════════════════════════
+   HELPERS
+══════════════════════════════════════════════════════ */
+const fmt   = n => '₹' + Math.abs(n).toLocaleString('en-IN', { maximumFractionDigits: 2 });
+const r2    = n => Math.round(n * 100) / 100;
+const today = () => new Date().toISOString().slice(0, 10);
+const uid   = () => '_' + Math.random().toString(36).slice(2, 10);
+const fmtDate = s => {
+  if (!s) return '';
+  const d = new Date(s + 'T00:00:00');
+  return d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
+};
 
 const AVATAR_COLOURS = [
   '#7c3aed','#2563eb','#059669','#dc2626',
   '#d97706','#db2777','#0891b2','#65a30d',
 ];
+let _colourIdx = 0;
+const nextColour = () => AVATAR_COLOURS[_colourIdx++ % AVATAR_COLOURS.length];
 
-const ME = { id: 'me', name: 'You', colour: '#7c3aed' };
+const ICONS = { trip:'✈️', home:'🏠', food:'🍔', work:'💼', other:'👥' };
 
-/* ══════════════════════════════════════════════════════════════
-   DB  – localStorage wrapper
-══════════════════════════════════════════════════════════════ */
+const toast = (msg, dur = 2500) => {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.remove('hidden');
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => t.classList.add('hidden'), dur);
+};
+
+/* ══════════════════════════════════════════════════════
+   DB – localStorage
+══════════════════════════════════════════════════════ */
 const DB = {
-  KEY: 'fairshare_v1',
-
+  KEY: 'fairshare_v2',
   load() {
-    try {
-      const raw = localStorage.getItem(this.KEY);
-      return raw ? JSON.parse(raw) : null;
-    } catch { return null; }
+    try { const r = localStorage.getItem(this.KEY); return r ? JSON.parse(r) : null; }
+    catch { return null; }
   },
-
-  save(data) {
-    try { localStorage.setItem(this.KEY, JSON.stringify(data)); } catch {}
+  save(d) {
+    try { localStorage.setItem(this.KEY, JSON.stringify(d)); } catch {}
   },
-
-  defaultData() {
-    return { friends: [], groups: [], expenses: [], payments: [], nextId: 1 };
+  default() {
+    return { friends: [], bills: [], groups: [], history: [] };
   },
 };
 
-/* ══════════════════════════════════════════════════════════════
-   STORE  – in-memory state + computed helpers
-══════════════════════════════════════════════════════════════ */
+/* ══════════════════════════════════════════════════════
+   STORE – single source of truth
+══════════════════════════════════════════════════════ */
 const Store = {
-  friends: [],
-  groups: [],
-  expenses: [],
-  payments: [],
-  nextId: 1,
+  friends: [],  // { id, name, contact, colour }
+  bills: [],    // { id, name, amount, date, note, splits:[{friendId,amount,settled}] }
+  groups: [],   // { id, name, type, members:[friendId], expenses:[{id,name,amount,date,note,splits:[{friendId,amount,settled}]}] }
+  history: [],  // settled items { id, type, name, amount, settledAt, detail }
 
   init() {
-    const data = DB.load() || DB.defaultData();
-    Object.assign(this, data);
+    const d = DB.load() || DB.default();
+    this.friends = d.friends || [];
+    this.bills   = d.bills   || [];
+    this.groups  = d.groups  || [];
+    this.history = d.history || [];
+    this._pruneHistory();
   },
 
-  persist() {
-    DB.save({
-      friends:  this.friends,
-      groups:   this.groups,
-      expenses: this.expenses,
-      payments: this.payments,
-      nextId:   this.nextId,
-    });
+  save() {
+    DB.save({ friends: this.friends, bills: this.bills, groups: this.groups, history: this.history });
   },
 
-  uid() { return this.nextId++; },
+  getFriend(id)   { return this.friends.find(f => f.id === id); },
+  getBill(id)     { return this.bills.find(b => b.id === id); },
+  getGroup(id)    { return this.groups.find(g => g.id === id); },
 
-  /** All people including "me" */
-  allPeople() { return [ME, ...this.friends]; },
+  /** Find friend by contact (phone/email) — prevents duplicates */
+  findByContact(contact) {
+    const c = contact.trim().toLowerCase();
+    return this.friends.find(f => f.contact.trim().toLowerCase() === c);
+  },
 
-  getPerson(id) { return id === 'me' ? ME : this.friends.find(f => f.id === id); },
-  getGroup(id)  { return this.groups.find(g => g.id === id); },
+  /** Add or return existing friend. Returns friend object. */
+  upsertFriend(name, contact) {
+    const existing = this.findByContact(contact);
+    if (existing) return existing;
+    const f = { id: uid(), name: name.trim(), contact: contact.trim(), colour: nextColour() };
+    this.friends.push(f);
+    this.save();
+    return f;
+  },
 
+  /** Prune history older than 30 days */
+  _pruneHistory() {
+    const cutoff = Date.now() - 30 * 24 * 60 * 60 * 1000;
+    this.history = this.history.filter(h => new Date(h.settledAt).getTime() > cutoff);
+    this.save();
+  },
+};
+
+/* ══════════════════════════════════════════════════════
+   CALC – all balance calculations
+   Rule: "You" always paid. Friends owe "You".
+   Positive balance = friend owes you.
+   Negative balance = you owe friend (not implemented in phase 1,
+   but structure supports it).
+══════════════════════════════════════════════════════ */
+const Calc = {
   /**
-   * Compute net balance per friend.
-   * Returns { friendId → amount }  positive = they owe me, negative = I owe them
+   * Returns { friendId → netAmount } across ALL bills + ALL group expenses.
+   * Positive = they owe you. Negative = you owe them.
+   * Only counts unsettled splits.
    */
-  balances() {
+  allBalances() {
     const bal = {};
-    this.friends.forEach(f => { bal[f.id] = 0; });
+    Store.friends.forEach(f => { bal[f.id] = 0; });
 
-    for (const exp of this.expenses) {
-      if (exp.deleted) continue;
-      const paidBy = exp.paidBy;
-      const splits = exp.splits; // [{personId, amount}]
-
-      for (const s of splits) {
-        if (paidBy === 'me' && s.personId !== 'me') {
-          // I paid, friend owes me
-          bal[s.personId] = (bal[s.personId] || 0) + s.amount;
-        } else if (paidBy !== 'me' && s.personId === 'me') {
-          // Friend paid, I owe friend
-          bal[paidBy] = (bal[paidBy] || 0) - s.amount;
+    // Individual bills
+    for (const bill of Store.bills) {
+      for (const sp of bill.splits) {
+        if (!sp.settled) {
+          bal[sp.friendId] = (bal[sp.friendId] || 0) + sp.amount;
         }
       }
     }
 
-    // Apply payments
-    for (const p of this.payments) {
-      if (p.deleted) continue;
-      // payer paid payee
-      if (p.payer === 'me') {
-        bal[p.payee] = (bal[p.payee] || 0) - p.amount;
-      } else if (p.payee === 'me') {
-        bal[p.payer] = (bal[p.payer] || 0) + p.amount;
+    // Group expenses
+    for (const group of Store.groups) {
+      for (const exp of group.expenses) {
+        for (const sp of exp.splits) {
+          if (!sp.settled) {
+            bal[sp.friendId] = (bal[sp.friendId] || 0) + sp.amount;
+          }
+        }
       }
     }
 
     return bal;
   },
 
-  /** Balances within a specific group */
-  groupBalances(groupId) {
-    const group = this.getGroup(groupId);
-    if (!group) return [];
-    const members = group.members; // ['me', friendId, ...]
+  /** Balance for one specific friend across everything */
+  friendBalance(friendId) {
+    return this.allBalances()[friendId] || 0;
+  },
 
-    // Simplified: for each expense in this group compute who owes whom
-    const owes = {}; // 'personA→personB' → amount
-    const expenses = this.expenses.filter(e => e.groupId === groupId && !e.deleted);
+  /** All unsettled transactions involving a specific friend
+   *  Returns array of { type:'bill'|'group', sourceId, expId?, name, date, amount, splitId, settled }
+   */
+  friendTransactions(friendId) {
+    const txns = [];
 
-    for (const exp of expenses) {
-      const { paidBy, splits } = exp;
-      for (const s of splits) {
-        if (s.personId === paidBy) continue;
-        const key = `${s.personId}→${paidBy}`;
-        owes[key] = (owes[key] || 0) + s.amount;
+    // Individual bills
+    for (const bill of Store.bills) {
+      const sp = bill.splits.find(s => s.friendId === friendId);
+      if (sp) {
+        txns.push({
+          type: 'bill', sourceId: bill.id, expId: null,
+          name: bill.name, date: bill.date,
+          amount: sp.amount, settled: sp.settled,
+          note: bill.note,
+        });
       }
     }
 
-    // Simplify debts
-    const result = [];
-    for (const [key, amt] of Object.entries(owes)) {
-      if (amt < 0.01) continue;
-      const [from, to] = key.split('→');
-      result.push({ from, to, amount: amt });
+    // Group expenses
+    for (const group of Store.groups) {
+      for (const exp of group.expenses) {
+        const sp = exp.splits.find(s => s.friendId === friendId);
+        if (sp) {
+          txns.push({
+            type: 'group', sourceId: group.id, expId: exp.id,
+            name: `${exp.name} (${group.name})`,
+            date: exp.date, amount: sp.amount, settled: sp.settled,
+            note: exp.note,
+          });
+        }
+      }
     }
-    return result;
+
+    // Sort newest first
+    txns.sort((a, b) => new Date(b.date) - new Date(a.date));
+    return txns;
   },
 
-  totalSpent() {
-    return this.expenses
-      .filter(e => !e.deleted && e.paidBy === 'me')
-      .reduce((s, e) => s + e.amount, 0);
+  /** Balances within a group — who owes how much to "You" */
+  groupBalances(groupId) {
+    const group = Store.getGroup(groupId);
+    if (!group) return [];
+    const bal = {};
+    group.members.forEach(id => { bal[id] = 0; });
+    for (const exp of group.expenses) {
+      for (const sp of exp.splits) {
+        if (!sp.settled) bal[sp.friendId] = (bal[sp.friendId] || 0) + sp.amount;
+      }
+    }
+    return Object.entries(bal).map(([id, amt]) => ({ friendId: id, amount: amt })).filter(b => b.amount > 0.005);
   },
 
-  spentByCategory() {
-    const cats = {};
-    for (const e of this.expenses) {
-      if (e.deleted) continue;
-      cats[e.category] = (cats[e.category] || 0) + e.amount;
+  summaryTotals() {
+    const bals = this.allBalances();
+    let owed = 0, owe = 0;
+    for (const a of Object.values(bals)) {
+      if (a > 0) owed += a; else owe += Math.abs(a);
     }
-    return cats;
-  },
-
-  monthlyTrend() {
-    const months = {};
-    const now = new Date();
-    for (let i = 5; i >= 0; i--) {
-      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
-      const key = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
-      months[key] = 0;
-    }
-    for (const e of this.expenses) {
-      if (e.deleted) continue;
-      const key = e.date.slice(0, 7);
-      if (months[key] !== undefined) months[key] += e.amount;
-    }
-    return months;
+    return { owed: r2(owed), owe: r2(owe), net: r2(owed - owe) };
   },
 };
 
-/* ══════════════════════════════════════════════════════════════
-   UI
-══════════════════════════════════════════════════════════════ */
-const UI = {
-  currentPage: 'pageHome',
-  pageStack: [],
+/* ══════════════════════════════════════════════════════
+   NAV – page routing
+══════════════════════════════════════════════════════ */
+const Nav = {
+  stack: [],
+  current: 'pageHome',
+  _detail: {},  // extra context for detail pages
 
-  init() {
-    // Bottom nav
-    document.querySelectorAll('.nav-btn[data-page]').forEach(btn => {
-      btn.addEventListener('click', () => this.showPage(btn.dataset.page));
-    });
-    // Back btn
-    document.getElementById('backBtn').addEventListener('click', () => this.goBack());
-    // Filter buttons
-    document.querySelectorAll('.filter-btn').forEach(btn => {
-      btn.addEventListener('click', () => {
-        document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
-        btn.classList.add('active');
-        this.renderActivity(btn.dataset.filter);
-      });
-    });
-    // Recurring toggle
-    document.getElementById('expRecurring').addEventListener('change', e => {
-      document.getElementById('expRecurFreq').classList.toggle('hidden', !e.target.checked);
-    });
-    // Split type
-    document.querySelectorAll('.split-type').forEach(btn => {
-      btn.addEventListener('click', () => {
-        document.querySelectorAll('.split-type').forEach(b => b.classList.remove('active'));
-        btn.classList.add('active');
-        this.updateSplitUI(btn.dataset.type);
-      });
-    });
-    // Expense group change
-    document.getElementById('expGroup').addEventListener('change', () => {
-      this.populateSplitMembers();
-    });
-  },
-
-  /* ── Page routing ────────────────────────────────────── */
-  showPage(pageId, pushStack = true) {
-    if (pageId === this.currentPage && pushStack) return;
-
+  go(pageId, btn) {
+    // hide all pages
     document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
     document.getElementById(pageId).classList.add('active');
 
-    // Nav highlight
-    document.querySelectorAll('.nav-btn[data-page]').forEach(b => {
-      b.classList.toggle('active', b.dataset.page === pageId);
-    });
+    // nav highlight (only for main tabs)
+    document.querySelectorAll('.nav-btn[data-page]').forEach(b => b.classList.remove('active'));
+    if (btn) btn.classList.add('active');
 
-    // Topbar
+    // topbar
     const titles = {
-      pageHome: 'FairShare', pageGroups: 'Groups',
-      pageGroupDetail: '', pageActivity: 'Activity', pageAnalytics: 'Analytics',
+      pageHome: 'FairShare', pageBills: 'Bills',
+      pageGroups: 'Groups', pageHistory: 'History',
     };
     document.getElementById('topbarTitle').textContent = titles[pageId] || '';
+    document.getElementById('backBtn').classList.toggle('hidden',
+      ['pageHome','pageBills','pageGroups','pageHistory'].includes(pageId));
+    document.getElementById('topbarRight').innerHTML = '';
 
-    const backBtn = document.getElementById('backBtn');
-    backBtn.classList.toggle('hidden', ['pageHome','pageGroups','pageActivity','pageAnalytics'].includes(pageId));
-
-    if (pushStack && pageId !== this.currentPage) this.pageStack.push(this.currentPage);
-    this.currentPage = pageId;
-
-    this.renderPage(pageId);
+    if (pageId !== this.current) this.stack.push(this.current);
+    this.current = pageId;
+    Render.page(pageId);
   },
 
-  goBack() {
-    const prev = this.pageStack.pop();
-    if (prev) this.showPage(prev, false);
+  detail(pageId, context) {
+    this._detail[pageId] = context;
+    this.go(pageId, null);
   },
 
-  renderPage(pageId) {
-    switch (pageId) {
-      case 'pageHome':        this.renderHome(); break;
-      case 'pageGroups':      this.renderGroups(); break;
-      case 'pageGroupDetail': this.renderGroupDetail(App.currentGroupId); break;
-      case 'pageActivity':    this.renderActivity('all'); break;
-      case 'pageAnalytics':   this.renderAnalytics(); break;
+  back() {
+    const prev = this.stack.pop();
+    if (prev) this.go(prev, document.querySelector(`.nav-btn[data-page="${prev}"]`));
+  },
+};
+
+/* ══════════════════════════════════════════════════════
+   RENDER
+══════════════════════════════════════════════════════ */
+const Render = {
+  page(id) {
+    switch (id) {
+      case 'pageHome':        return this.home();
+      case 'pageFriendDetail':return this.friendDetail(Nav._detail['pageFriendDetail']);
+      case 'pageBills':       return this.bills();
+      case 'pageBillDetail':  return this.billDetail(Nav._detail['pageBillDetail']);
+      case 'pageGroups':      return this.groups();
+      case 'pageGroupDetail': return this.groupDetail(Nav._detail['pageGroupDetail']);
+      case 'pageHistory':     return this.history();
     }
   },
 
-  /* ── Render: Home ────────────────────────────────────── */
-  renderHome() {
-    const bals = Store.balances();
-    let totalOwedToMe = 0, totalIOwe = 0;
-    for (const [id, amt] of Object.entries(bals)) {
-      if (amt > 0) totalOwedToMe += amt;
-      else totalIOwe += Math.abs(amt);
-    }
-    const net = totalOwedToMe - totalIOwe;
+  /* ── Home ──────────────────────────────────────────── */
+  home() {
+    const { owed, owe, net } = Calc.summaryTotals();
+    document.getElementById('totalOwed').textContent  = fmt(owed);
+    document.getElementById('totalOwe').textContent   = fmt(owe);
+    const netEl = document.getElementById('netBalance');
+    netEl.textContent = fmt(net);
+    netEl.className = 'summary-val ' + (net > 0 ? 'green' : net < 0 ? 'red' : '');
 
-    document.getElementById('heroOwed').textContent  = fmt(net);
-    document.getElementById('heroOwe').textContent   = `You owe ${fmt(totalIOwe)}`;
-    document.getElementById('heroOwn').textContent   = `Owed to you ${fmt(totalOwedToMe)}`;
-
+    const bals = Calc.allBalances();
     const list = document.getElementById('friendsList');
+
     if (!Store.friends.length) {
-      list.innerHTML = `<div class="empty-state"><div class="empty-icon">👋</div><p>Add friends to start splitting</p></div>`;
+      list.innerHTML = `<div class="empty-state"><div class="empty-icon">👋</div><p>Add friends to start splitting bills</p></div>`;
       return;
     }
 
     list.innerHTML = Store.friends.map(f => {
       const bal = bals[f.id] || 0;
-      const cls = bal > 0.01 ? 'positive' : bal < -0.01 ? 'negative' : 'zero';
-      const label = bal > 0.01 ? `owes you ${fmt(bal)}` : bal < -0.01 ? `you owe ${fmt(Math.abs(bal))}` : 'settled up';
+      const cls = bal > 0.005 ? 'positive' : bal < -0.005 ? 'negative' : 'zero';
+      const lbl = bal > 0.005 ? 'owes you' : bal < -0.005 ? 'you owe' : 'settled up';
       return `
-        <div class="friend-card" onclick="UI.openFriendDetail('${f.id}')">
+        <div class="friend-card" onclick="Nav.detail('pageFriendDetail','${f.id}')">
           <div class="avatar" style="background:${f.colour}">${initials(f.name)}</div>
-          <div class="friend-info">
-            <div class="friend-name">${f.name}</div>
-            <div class="friend-sub">${f.contact || 'No contact'}</div>
+          <div class="fc-info">
+            <div class="fc-name">${esc(f.name)}</div>
+            <div class="fc-contact">${esc(f.contact)}</div>
           </div>
-          <div class="friend-balance ${cls}">${fmt(Math.abs(bal))}</div>
+          <div class="fc-balance">
+            <div class="fc-bal-amt ${cls}">${fmt(Math.abs(bal))}</div>
+            <div class="fc-bal-lbl">${lbl}</div>
+          </div>
         </div>`;
     }).join('');
   },
 
-  /* ── Render: Groups ──────────────────────────────────── */
-  renderGroups() {
+  /* ── Friend Detail ─────────────────────────────────── */
+  friendDetail(friendId) {
+    const f = Store.getFriend(friendId);
+    if (!f) return;
+    const bal = Calc.friendBalance(friendId);
+    const cls = bal > 0.005 ? 'positive' : bal < -0.005 ? 'negative' : 'zero';
+    const lbl = bal > 0.005 ? 'owes you' : bal < -0.005 ? 'you owe' : 'All settled!';
+
+    document.getElementById('friendDetailHeader').innerHTML = `
+      <div class="avatar" style="background:${f.colour};width:54px;height:54px;font-size:1.2rem">${initials(f.name)}</div>
+      <div class="fd-info">
+        <div class="fd-name">${esc(f.name)}</div>
+        <div class="fd-contact">${esc(f.contact)}</div>
+        <div style="font-size:.75rem;color:var(--text2);margin-top:4px">${lbl}</div>
+      </div>
+      <div class="fd-balance ${cls}">${fmt(Math.abs(bal))}</div>
+    `;
+
+    document.getElementById('topbarTitle').textContent = f.name;
+
+    const txns = Calc.friendTransactions(friendId);
+    const container = document.getElementById('friendTransactions');
+
+    if (!txns.length) {
+      container.innerHTML = `<div class="empty-state"><div class="empty-icon">📭</div><p>No transactions yet</p></div>`;
+    } else {
+      container.innerHTML = txns.map(t => {
+        const badge = t.type === 'bill'
+          ? `<span class="txn-badge badge-bill">Bill</span>`
+          : `<span class="txn-badge badge-group">Group</span>`;
+        const amtCls = t.settled ? 'zero' : 'negative';
+        const settleBtn = t.settled
+          ? `<span class="btn-settle-done">✓ Settled</span>`
+          : `<button class="btn-settle" onclick="Actions.settleTransaction('${f.id}','${t.sourceId}','${t.expId}','${t.type}')">Settle ₹${Math.abs(t.amount).toFixed(2)}</button>`;
+        return `
+          <div class="txn-card">
+            <div class="txn-top">
+              <div>
+                <div class="txn-name">${esc(t.name)}</div>
+                <div class="txn-meta">${fmtDate(t.date)}${t.note ? ' · ' + esc(t.note) : ''}</div>
+              </div>
+              <div style="display:flex;flex-direction:column;align-items:flex-end;gap:5px">
+                ${badge}
+                <div class="txn-amount ${amtCls}">${fmt(t.amount)}</div>
+              </div>
+            </div>
+            <div class="txn-bottom">${settleBtn}</div>
+          </div>`;
+      }).join('');
+    }
+
+    // Settle all button
+    const unsettled = txns.filter(t => !t.settled);
+    const totalUnsettled = r2(unsettled.reduce((s, t) => s + t.amount, 0));
+    const settleAllDiv = document.getElementById('friendSettleAll');
+    if (unsettled.length > 1) {
+      settleAllDiv.innerHTML = `
+        <button class="btn-full-green" onclick="Actions.settleAllWithFriend('${friendId}')">
+          ✓ Settle All with ${esc(f.name)} — ${fmt(totalUnsettled)}
+        </button>`;
+    } else {
+      settleAllDiv.innerHTML = '';
+    }
+  },
+
+  /* ── Bills ─────────────────────────────────────────── */
+  bills() {
+    const list = document.getElementById('billsList');
+    if (!Store.bills.length) {
+      list.innerHTML = `<div class="empty-state"><div class="empty-icon">🧾</div><p>No bills yet. Add your first bill!</p></div>`;
+      return;
+    }
+    // newest first
+    const sorted = [...Store.bills].sort((a, b) => new Date(b.date) - new Date(a.date));
+    list.innerHTML = sorted.map(b => {
+      const chips = b.splits.map(sp => {
+        const f = Store.getFriend(sp.friendId);
+        const cls = sp.settled ? 'settled' : 'unsettled';
+        return `<span class="bill-person-chip ${cls}">${esc(f?.name || '?')}</span>`;
+      }).join('');
+      const allSettled = b.splits.every(s => s.settled);
+      return `
+        <div class="bill-card" onclick="Nav.detail('pageBillDetail','${b.id}')">
+          <div class="bill-top">
+            <div>
+              <div class="bill-name">${esc(b.name)}</div>
+              <div class="bill-meta">${fmtDate(b.date)}${b.note ? ' · ' + esc(b.note) : ''}</div>
+            </div>
+            <div>
+              <div class="bill-amount">${fmt(b.amount)}</div>
+              ${allSettled ? '<div style="font-size:.7rem;color:var(--green);text-align:right;margin-top:3px">✓ Settled</div>' : ''}
+            </div>
+          </div>
+          <div class="bill-people">${chips}</div>
+        </div>`;
+    }).join('');
+  },
+
+  /* ── Bill Detail ───────────────────────────────────── */
+  billDetail(billId) {
+    const bill = Store.getBill(billId);
+    if (!bill) return;
+    document.getElementById('topbarTitle').textContent = bill.name;
+    document.getElementById('billDetailHeader').innerHTML = `
+      <div class="bd-name">${esc(bill.name)}</div>
+      <div class="bd-meta">${fmtDate(bill.date)}${bill.note ? ' · ' + esc(bill.note) : ''}</div>
+      <div class="bd-total">${fmt(bill.amount)}</div>
+    `;
+    document.getElementById('billSplits').innerHTML = bill.splits.map(sp => {
+      const f = Store.getFriend(sp.friendId);
+      const cls = sp.settled ? 'settled' : 'unsettled';
+      const statusTxt = sp.settled ? '✓ Settled' : 'Unsettled';
+      const btn = sp.settled
+        ? `<span class="btn-settle-done" style="font-size:.8rem">✓ Done</span>`
+        : `<button class="btn-settle" onclick="Actions.settleBillSplit('${billId}','${sp.friendId}')">Settle</button>`;
+      return `
+        <div class="split-person-card">
+          <div class="avatar" style="background:${f?.colour||'#7c3aed'};width:40px;height:40px;font-size:.88rem">${initials(f?.name||'?')}</div>
+          <div class="spc-info">
+            <div class="spc-name">${esc(f?.name||'?')}</div>
+            <div class="spc-status ${cls}">${statusTxt}</div>
+          </div>
+          <div class="spc-amount ${cls}">${fmt(sp.amount)}</div>
+          ${btn}
+        </div>`;
+    }).join('');
+  },
+
+  /* ── Groups ────────────────────────────────────────── */
+  groups() {
     const list = document.getElementById('groupsList');
     if (!Store.groups.length) {
-      list.innerHTML = `<div class="empty-state"><div class="empty-icon">🏠</div><p>No groups yet. Create one!</p></div>`;
+      list.innerHTML = `<div class="empty-state"><div class="empty-icon">👥</div><p>No groups yet. Create one!</p></div>`;
       return;
     }
     list.innerHTML = Store.groups.map(g => {
-      const exps = Store.expenses.filter(e => e.groupId === g.id && !e.deleted);
-      const total = exps.reduce((s, e) => s + e.amount, 0);
-      const gtype = GROUP_TYPES.find(t => t.id === g.type) || GROUP_TYPES[4];
+      const icon = ICONS[g.type] || '👥';
+      const total = g.expenses.reduce((s, e) => s + e.amount, 0);
+      const bals = Calc.groupBalances(g.id);
+      const totalOwed = r2(bals.reduce((s, b) => s + b.amount, 0));
+      const allSettled = bals.length === 0;
       return `
-        <div class="group-card" onclick="UI.openGroup('${g.id}')">
-          <div class="group-card-top">
-            <span class="group-icon">${gtype.icon}</span>
+        <div class="group-card" onclick="Nav.detail('pageGroupDetail','${g.id}')">
+          <div class="gc-top">
+            <span class="gc-icon">${icon}</span>
             <div>
-              <div class="group-card-name">${g.name}</div>
-              <div class="group-card-sub">${g.members.length} members · ${exps.length} expenses</div>
+              <div class="gc-name">${esc(g.name)}</div>
+              <div class="gc-meta">${g.members.length} members · ${g.expenses.length} expenses</div>
             </div>
           </div>
-          <div class="group-card-bal">
-            <span class="group-bal-label">Total spent</span>
-            <span class="group-bal-val">${fmt(total)}</span>
+          <div class="gc-stats">
+            <div class="gc-stat-item">
+              <div class="gc-stat-val">${fmt(total)}</div>
+              <div class="gc-stat-lbl">Total Spent</div>
+            </div>
+            <div class="gc-stat-item">
+              <div class="gc-stat-val" style="color:${allSettled?'var(--green)':'var(--amber)'}">${allSettled ? '✓ All Settled' : fmt(totalOwed)}</div>
+              <div class="gc-stat-lbl">Outstanding</div>
+            </div>
           </div>
         </div>`;
     }).join('');
   },
 
-  /* ── Render: Group detail ────────────────────────────── */
-  renderGroupDetail(groupId) {
+  /* ── Group Detail ──────────────────────────────────── */
+  groupDetail(groupId) {
     const group = Store.getGroup(groupId);
     if (!group) return;
-    const gtype = GROUP_TYPES.find(t => t.id === group.type) || GROUP_TYPES[4];
-    const exps = Store.expenses.filter(e => e.groupId === groupId && !e.deleted);
-    const total = exps.reduce((s, e) => s + e.amount, 0);
-
+    const icon = ICONS[group.type] || '👥';
+    const total = r2(group.expenses.reduce((s, e) => s + e.amount, 0));
     document.getElementById('topbarTitle').textContent = group.name;
-    document.getElementById('groupHero').innerHTML = `
-      <div style="font-size:2rem;margin-bottom:8px">${gtype.icon}</div>
-      <div style="font-size:1.2rem;font-weight:800;color:var(--text)">${group.name}</div>
-      <div style="font-size:.8rem;color:var(--text-2);margin-top:4px">${group.members.length} members · Total ${fmt(total)}</div>
+
+    document.getElementById('groupDetailHeader').innerHTML = `
+      <div class="gdh-top">
+        <span class="gdh-icon">${icon}</span>
+        <div>
+          <div class="gdh-name">${esc(group.name)}</div>
+          <div class="gdh-meta">${group.members.length} members</div>
+        </div>
+      </div>
+      <div class="gdh-total-lbl">Total Spent</div>
+      <div class="gdh-total-amt">${fmt(total)}</div>
     `;
 
     // Balances
-    const bals = Store.groupBalances(groupId);
+    const bals = Calc.groupBalances(groupId);
     const balDiv = document.getElementById('groupBalances');
     if (!bals.length) {
-      balDiv.innerHTML = '<div style="color:var(--text-3);font-size:.85rem;padding:8px 0">✅ All settled up!</div>';
+      balDiv.innerHTML = `<div style="padding:10px 0;color:var(--green);font-size:.88rem;font-weight:600">✓ All settled up in this group!</div>`;
     } else {
       balDiv.innerHTML = bals.map(b => {
-        const from = Store.getPerson(b.from);
-        const to   = Store.getPerson(b.to);
+        const f = Store.getFriend(b.friendId);
         return `
-          <div class="settle-row">
-            <span class="settle-text">${from?.name || '?'} owes ${to?.name || '?'}</span>
-            <span class="settle-amount">${fmt(b.amount)}</span>
-            <button class="settle-btn" onclick="UI.openSettle('${b.from}','${b.to}',${b.amount},'${groupId}')">Settle</button>
+          <div class="balance-row">
+            <div class="br-text"><strong>${esc(f?.name||'?')}</strong> owes you</div>
+            <span class="br-amount">${fmt(b.amount)}</span>
+            <button class="btn-settle" onclick="Actions.settleGroupMember('${groupId}','${b.friendId}',${b.amount})">Settle</button>
           </div>`;
       }).join('');
     }
 
     // Expenses
+    document.getElementById('addGroupExpenseBtn').onclick = () => Modals.openAddGroupExpense(groupId);
     const expDiv = document.getElementById('groupExpenses');
-    expDiv.innerHTML = exps.length ? exps.map(e => expenseHTML(e)).join('') :
-      '<div class="empty-state"><div class="empty-icon">💸</div><p>No expenses yet</p></div>';
+    if (!group.expenses.length) {
+      expDiv.innerHTML = `<div class="empty-state"><div class="empty-icon">💸</div><p>No expenses yet</p></div>`;
+    } else {
+      const sorted = [...group.expenses].sort((a, b) => new Date(b.date) - new Date(a.date));
+      expDiv.innerHTML = sorted.map(exp => {
+        const chips = exp.splits.map(sp => {
+          const f = Store.getFriend(sp.friendId);
+          const cls = sp.settled ? 'settled' : 'unsettled';
+          return `<span class="gec-chip ${cls}">${esc(f?.name||'?')} ${fmt(sp.amount)}</span>`;
+        }).join('');
+        return `
+          <div class="group-exp-card">
+            <div class="gec-top">
+              <div>
+                <div class="gec-name">${esc(exp.name)}</div>
+                <div class="gec-date">${fmtDate(exp.date)}${exp.note ? ' · ' + esc(exp.note) : ''}</div>
+              </div>
+              <div class="gec-amount">${fmt(exp.amount)}</div>
+            </div>
+            <div class="gec-splits">${chips}</div>
+          </div>`;
+      }).join('');
+    }
+
+    // Bottom actions
+    const actDiv = document.getElementById('groupActions');
+    const allSettled = bals.length === 0;
+    if (allSettled && group.expenses.length > 0) {
+      actDiv.innerHTML = `
+        <button class="btn-full-green" onclick="Actions.settleAllInGroup('${groupId}')">✓ Settle All & Archive Group</button>
+        <button class="btn-full-danger" onclick="Actions.deleteGroup('${groupId}')">🗑 Delete Group</button>
+      `;
+    } else if (bals.length > 0) {
+      const totalOwed = r2(bals.reduce((s, b) => s + b.amount, 0));
+      actDiv.innerHTML = `
+        <button class="btn-full" onclick="Actions.settleAllInGroup('${groupId}')">Settle Everyone in Group — ${fmt(totalOwed)}</button>
+      `;
+    } else {
+      actDiv.innerHTML = '';
+    }
   },
 
-  /* ── Render: Activity ────────────────────────────────── */
-  renderActivity(filter) {
-    const list = document.getElementById('activityList');
-    let items = [
-      ...Store.expenses.filter(e => !e.deleted).map(e => ({ ...e, _type: 'expense' })),
-      ...Store.payments.filter(p => !p.deleted).map(p => ({ ...p, _type: 'payment' })),
-    ].sort((a, b) => new Date(b.date) - new Date(a.date));
-
-    if (filter === 'expense') items = items.filter(i => i._type === 'expense');
-    if (filter === 'payment') items = items.filter(i => i._type === 'payment');
-
-    if (!items.length) {
-      list.innerHTML = '<div class="empty-state"><div class="empty-icon">📭</div><p>No activity yet</p></div>';
+  /* ── History ───────────────────────────────────────── */
+  history() {
+    Store._pruneHistory();
+    const list = document.getElementById('historyList');
+    if (!Store.history.length) {
+      list.innerHTML = `<div class="empty-state"><div class="empty-icon">🕐</div><p>No settled history yet</p></div>`;
       return;
     }
-    list.innerHTML = items.map(item => {
-      if (item._type === 'expense') {
-        const cat = CATEGORIES.find(c => c.id === item.category) || CATEGORIES[9];
-        const myShare = item.splits.find(s => s.personId === 'me')?.amount || 0;
-        const paidByMe = item.paidBy === 'me';
-        return `
-          <div class="activity-item">
-            <div class="act-icon">${cat.icon}</div>
-            <div class="act-info">
-              <div class="act-desc">${item.desc}</div>
-              <div class="act-meta">${formatDate(item.date)} · Paid by ${Store.getPerson(item.paidBy)?.name || '?'}</div>
-            </div>
-            <div class="act-amount" style="color:${paidByMe ? 'var(--green)' : 'var(--red)'}">
-              ${paidByMe ? '+' : '-'}${fmt(myShare)}
-            </div>
-          </div>`;
-      } else {
-        const payer = Store.getPerson(item.payer);
-        const payee = Store.getPerson(item.payee);
-        return `
-          <div class="activity-item">
-            <div class="act-icon">💸</div>
-            <div class="act-info">
-              <div class="act-desc">${payer?.name} paid ${payee?.name}</div>
-              <div class="act-meta">${formatDate(item.date)}</div>
-            </div>
-            <div class="act-amount" style="color:var(--green)">${fmt(item.amount)}</div>
-          </div>`;
-      }
-    }).join('');
+    const sorted = [...Store.history].sort((a, b) => new Date(b.settledAt) - new Date(a.settledAt));
+    list.innerHTML = sorted.map(h => `
+      <div class="history-card">
+        <div class="hc-top">
+          <div>
+            <div class="hc-name">${esc(h.name)}</div>
+            <div class="hc-meta">${esc(h.detail)} · Settled ${fmtDate(h.settledAt)}</div>
+          </div>
+          <span class="hc-badge">Settled</span>
+        </div>
+      </div>`).join('');
   },
+};
 
-  /* ── Render: Analytics ───────────────────────────────── */
-  renderAnalytics() {
-    const bals = Store.balances();
-    let owed = 0, iOwe = 0;
-    for (const amt of Object.values(bals)) {
-      if (amt > 0) owed += amt; else iOwe += Math.abs(amt);
-    }
-    const totalSpent = Store.totalSpent();
-    const numExp = Store.expenses.filter(e => !e.deleted).length;
+/* ══════════════════════════════════════════════════════
+   MODALS
+══════════════════════════════════════════════════════ */
+const Modals = {
+  _pendingSettle: null,
+  _billPeople: [],    // people being added to current bill
+  _groupMembers: [],  // members being added to current group
+  _activeGroupId: null,
 
-    document.getElementById('analyticsCards').innerHTML = `
-      <div class="ana-card">
-        <div class="ana-card-label">Total Spent</div>
-        <div class="ana-card-val">${fmt(totalSpent)}</div>
-        <div class="ana-card-sub">${numExp} expenses</div>
-      </div>
-      <div class="ana-card">
-        <div class="ana-card-label">Owed to You</div>
-        <div class="ana-card-val" style="color:var(--green)">${fmt(owed)}</div>
-        <div class="ana-card-sub">from ${Store.friends.length} friends</div>
-      </div>
-      <div class="ana-card">
-        <div class="ana-card-label">You Owe</div>
-        <div class="ana-card-val" style="color:var(--red)">${fmt(iOwe)}</div>
-        <div class="ana-card-sub">net balance</div>
-      </div>
-      <div class="ana-card">
-        <div class="ana-card-label">Groups</div>
-        <div class="ana-card-val">${Store.groups.length}</div>
-        <div class="ana-card-sub">active groups</div>
-      </div>
-    `;
+  open(id)  { document.getElementById(id).classList.remove('hidden'); },
+  close(id) { document.getElementById(id).classList.add('hidden'); },
 
-    // Category bars
-    const catSpend = Store.spentByCategory();
-    const maxCat = Math.max(...Object.values(catSpend), 1);
-    const catColours = ['#7c3aed','#2563eb','#059669','#d97706','#dc2626','#db2777','#0891b2','#65a30d','#f59e0b','#6b7280'];
-    document.getElementById('categoryBars').innerHTML = Object.entries(catSpend)
-      .sort((a, b) => b[1] - a[1]).slice(0, 6)
-      .map(([catId, amt], i) => {
-        const cat = CATEGORIES.find(c => c.id === catId) || CATEGORIES[9];
-        const pct = Math.round((amt / maxCat) * 100);
-        return `
-          <div class="cat-bar-row">
-            <div class="cat-bar-top">
-              <span class="cat-bar-name">${cat.icon} ${cat.label}</span>
-              <span class="cat-bar-amt">${fmt(amt)}</span>
-            </div>
-            <div class="cat-bar-track">
-              <div class="cat-bar-fill" style="width:${pct}%;background:${catColours[i]}"></div>
-            </div>
-          </div>`;
-      }).join('') || '<div class="empty-state"><p>No spending data yet</p></div>';
-
-    // Monthly trend
-    const trend = Store.monthlyTrend();
-    const maxTrend = Math.max(...Object.values(trend), 1);
-    const monthNames = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-    document.getElementById('trendChart').innerHTML = Object.entries(trend).map(([key, amt]) => {
-      const month = monthNames[parseInt(key.split('-')[1]) - 1];
-      const h = Math.max(4, Math.round((amt / maxTrend) * 80));
-      return `
-        <div class="trend-bar-wrap">
-          <div class="trend-bar" style="height:${h}px" title="${fmt(amt)}"></div>
-          <div class="trend-lbl">${month}</div>
-        </div>`;
-    }).join('');
-  },
-
-  /* ── Modals ──────────────────────────────────────────── */
-  openModal(id)  { document.getElementById(id).classList.remove('hidden'); },
-  closeModal(id) { document.getElementById(id).classList.add('hidden'); },
-
+  /* ── Add Friend ─────────────────────────────────────── */
   openAddFriend() {
-    document.getElementById('friendName').value    = '';
-    document.getElementById('friendContact').value = '';
-    // Avatar colours
-    document.getElementById('avatarColours').innerHTML = AVATAR_COLOURS.map((c, i) =>
-      `<div class="av-col ${i===0?'active':''}" style="background:${c}" data-colour="${c}" onclick="UI.selectAvatarColour(this)"></div>`
-    ).join('');
-    this.openModal('modalFriend');
-    setTimeout(() => document.getElementById('friendName').focus(), 100);
+    document.getElementById('fName').value    = '';
+    document.getElementById('fContact').value = '';
+    this.open('modalAddFriend');
+    setTimeout(() => document.getElementById('fName').focus(), 150);
   },
 
-  selectAvatarColour(el) {
-    document.querySelectorAll('.av-col').forEach(e => e.classList.remove('active'));
-    el.classList.add('active');
+  /* ── Add Bill ───────────────────────────────────────── */
+  openAddBill() {
+    this._billPeople = [];
+    document.getElementById('bName').value   = '';
+    document.getElementById('bAmount').value = '';
+    document.getElementById('bDate').value   = today();
+    document.getElementById('bNote').value   = '';
+    document.getElementById('bPersonName').value    = '';
+    document.getElementById('bPersonContact').value = '';
+    this._renderBillFriendPicker();
+    this._renderBillSplitRows();
+    this.open('modalAddBill');
+    setTimeout(() => document.getElementById('bName').focus(), 150);
   },
 
-  openCreateGroup() {
-    document.getElementById('groupName').value = '';
-    // Group type picker
-    document.getElementById('groupTypePicker').innerHTML = GROUP_TYPES.map((t, i) =>
-      `<button class="gtype-chip ${i===0?'active':''}" data-id="${t.id}" onclick="UI.selectGroupType(this)">${t.icon} ${t.label}</button>`
-    ).join('');
-    // Member checkboxes
-    const mc = document.getElementById('memberCheckboxes');
-    if (!Store.friends.length) {
-      mc.innerHTML = '<div class="empty-state" style="padding:12px 0"><p>Add friends first</p></div>';
+  _renderBillFriendPicker() {
+    const picked = this._billPeople.map(p => p.contact);
+    document.getElementById('billFriendPicker').innerHTML = Store.friends.map(f =>
+      `<span class="fp-chip ${picked.includes(f.contact)?'selected':''}"
+        onclick="Modals._toggleBillFriend('${f.id}')">${esc(f.name)}</span>`
+    ).join('') || '<span style="color:var(--text3);font-size:.8rem">No friends yet</span>';
+  },
+
+  _toggleBillFriend(friendId) {
+    const f = Store.getFriend(friendId);
+    if (!f) return;
+    const idx = this._billPeople.findIndex(p => p.contact === f.contact);
+    if (idx >= 0) {
+      this._billPeople.splice(idx, 1);
     } else {
-      mc.innerHTML = Store.friends.map(f =>
-        `<div class="member-check-row">
-          <input type="checkbox" id="mc_${f.id}" value="${f.id}"/>
-          <div class="avatar" style="background:${f.colour};width:30px;height:30px;font-size:.75rem">${initials(f.name)}</div>
-          <label for="mc_${f.id}">${f.name}</label>
-        </div>`
-      ).join('');
+      this._billPeople.push({ name: f.name, contact: f.contact, isExisting: true });
     }
-    this.openModal('modalGroup');
+    this._renderBillFriendPicker();
+    this._renderBillSplitRows();
   },
 
-  selectGroupType(el) {
-    document.querySelectorAll('.gtype-chip').forEach(e => e.classList.remove('active'));
-    el.classList.add('active');
-  },
-
-  openAddExpense(groupId = null) {
-    // Reset form
-    document.getElementById('expDesc').value   = '';
-    document.getElementById('expAmount').value = '';
-    document.getElementById('expNote').value   = '';
-    document.getElementById('expDate').value   = today();
-    document.getElementById('expRecurring').checked = false;
-    document.getElementById('expRecurFreq').classList.add('hidden');
-    document.querySelectorAll('.split-type').forEach((b,i) => b.classList.toggle('active', i===0));
-    document.getElementById('splitCustom').classList.add('hidden');
-
-    // Category picker
-    document.getElementById('categoryPicker').innerHTML = CATEGORIES.map((c, i) =>
-      `<button class="cat-chip ${i===0?'active':''}" data-id="${c.id}" onclick="UI.selectCategory(this)">${c.icon} ${c.label}</button>`
-    ).join('');
-
-    // Paid by
-    const paidBy = document.getElementById('expPaidBy');
-    paidBy.innerHTML = Store.allPeople().map(p =>
-      `<option value="${p.id}" ${p.id==='me'?'selected':''}>${p.name}</option>`
-    ).join('');
-
-    // Group select
-    const grpSel = document.getElementById('expGroup');
-    grpSel.innerHTML = '<option value="">No group</option>' +
-      Store.groups.map(g => `<option value="${g.id}" ${g.id===groupId?'selected':''}>${g.name}</option>`).join('');
-
-    this.populateSplitMembers();
-    this.openModal('modalExpense');
-    setTimeout(() => document.getElementById('expDesc').focus(), 100);
-  },
-
-  selectCategory(el) {
-    document.querySelectorAll('.cat-chip').forEach(e => e.classList.remove('active'));
-    el.classList.add('active');
-  },
-
-  populateSplitMembers() {
-    const groupId = document.getElementById('expGroup').value;
-    let people;
-    if (groupId) {
-      const group = Store.getGroup(groupId);
-      people = group ? group.members.map(id => Store.getPerson(id)).filter(Boolean) : Store.allPeople();
-    } else {
-      people = Store.allPeople();
+  _renderBillSplitRows() {
+    const rowsDiv = document.getElementById('billSplitRows');
+    if (!this._billPeople.length) {
+      rowsDiv.innerHTML = '<div style="color:var(--text3);font-size:.82rem;padding:8px 0">Add people above to split the bill</div>';
+      document.getElementById('billSplitTotal').textContent = '₹0';
+      document.getElementById('billSplitTotal').className = 'split-total-val';
+      return;
     }
-
-    document.getElementById('splitMembers').innerHTML = people.map(p =>
-      `<div class="split-member-row">
-        <input class="split-member-check" type="checkbox" id="sm_${p.id}" value="${p.id}" checked/>
-        <div class="avatar" style="background:${p.colour||'#7c3aed'};width:28px;height:28px;font-size:.7rem">${initials(p.name)}</div>
-        <label class="split-member-name" for="sm_${p.id}">${p.name}</label>
-        <span class="split-member-share" id="sms_${p.id}"></span>
+    rowsDiv.innerHTML = this._billPeople.map((p, i) =>
+      `<div class="split-row">
+        <span class="split-row-name">${esc(p.name)}</span>
+        <input class="split-row-input" type="number" inputmode="decimal"
+          id="bsplit_${i}" placeholder="0" oninput="Modals._updateBillTotal()"/>
+        <button class="split-row-remove" onclick="Modals._removeBillPerson(${i})">✕</button>
       </div>`
     ).join('');
-
-    // Update share preview on amount change
-    const updateShares = () => {
-      const amt = parseFloat(document.getElementById('expAmount').value) || 0;
-      const checked = [...document.querySelectorAll('.split-member-check:checked')];
-      const share = checked.length ? amt / checked.length : 0;
-      document.querySelectorAll('.split-member-share').forEach(el => { el.textContent = ''; });
-      checked.forEach(c => {
-        const el = document.getElementById(`sms_${c.value}`);
-        if (el) el.textContent = fmt(share);
-      });
-    };
-    document.getElementById('expAmount').addEventListener('input', updateShares);
-    document.querySelectorAll('.split-member-check').forEach(c => c.addEventListener('change', updateShares));
+    this._updateBillTotal();
   },
 
-  updateSplitUI(type) {
-    const custom = document.getElementById('splitCustom');
-    if (type === 'equal') {
-      custom.classList.add('hidden');
-      return;
-    }
-    custom.classList.remove('hidden');
-    const checked = [...document.querySelectorAll('.split-member-check:checked')];
-    const amt = parseFloat(document.getElementById('expAmount').value) || 0;
-    const unit = type === 'percent' ? '%' : '₹';
-    const defaultVal = type === 'percent'
-      ? (checked.length ? Math.round(100 / checked.length) : 0)
-      : (checked.length ? (amt / checked.length).toFixed(2) : 0);
-
-    custom.innerHTML = checked.map(c => {
-      const p = Store.getPerson(c.value);
-      return `
-        <div class="split-custom-row">
-          <span class="split-custom-name">${p?.name || '?'}</span>
-          <input class="split-custom-input" type="number" id="scv_${c.value}" value="${defaultVal}" placeholder="0"/>
-          <span style="color:var(--text-2);font-size:.85rem">${unit}</span>
-        </div>`;
-    }).join('');
-  },
-
-  openGroup(groupId) {
-    App.currentGroupId = groupId;
-    this.pageStack.push(this.currentPage);
-    this.currentPage = 'pageGroupDetail';
-    document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
-    document.getElementById('pageGroupDetail').classList.add('active');
-    document.getElementById('backBtn').classList.remove('hidden');
-    document.querySelectorAll('.nav-btn[data-page]').forEach(b => b.classList.remove('active'));
-    this.renderGroupDetail(groupId);
-  },
-
-  openFriendDetail(friendId) {
-    // Show activity filtered by friend
-    this.showPage('pageActivity');
-    // TODO: filter by friend — for now shows all
-  },
-
-  openSettle(fromId, toId, amount, groupId) {
-    App.pendingSettle = { fromId, toId, amount, groupId };
-    const from = Store.getPerson(fromId);
-    const to   = Store.getPerson(toId);
-    document.getElementById('settleBody').innerHTML = `
-      <div class="settle-confirm">
-        <p><strong>${from?.name}</strong> pays <strong>${to?.name}</strong></p>
-        <span class="settle-amount-big">${fmt(amount)}</span>
-        <p style="color:var(--text-2);font-size:.85rem">This will be recorded as a payment and balances will update.</p>
-      </div>`;
-    this.openModal('modalSettle');
-  },
-
-  toast(msg, duration = 2200) {
-    const t = document.getElementById('toast');
-    t.textContent = msg;
-    t.classList.remove('hidden');
-    clearTimeout(this._toastTimer);
-    this._toastTimer = setTimeout(() => t.classList.add('hidden'), duration);
-  },
-};
-
-/* ══════════════════════════════════════════════════════════════
-   APP  – business logic
-══════════════════════════════════════════════════════════════ */
-const App = {
-  currentGroupId: null,
-  pendingSettle: null,
-
-  /* ── Save friend ─────────────────────────────────────── */
-  saveFriend() {
-    const name = document.getElementById('friendName').value.trim();
-    if (!name) { UI.toast('Please enter a name'); return; }
-    const colour = document.querySelector('.av-col.active')?.dataset.colour || AVATAR_COLOURS[0];
-    const contact = document.getElementById('friendContact').value.trim();
-    const friend = { id: Store.uid(), name, colour, contact };
-    Store.friends.push(friend);
-    Store.persist();
-    UI.closeModal('modalFriend');
-    UI.toast(`${name} added!`);
-    UI.renderHome();
-  },
-
-  /* ── Save group ──────────────────────────────────────── */
-  saveGroup() {
-    const name = document.getElementById('groupName').value.trim();
-    if (!name) { UI.toast('Please enter a group name'); return; }
-    const type = document.querySelector('.gtype-chip.active')?.dataset.id || 'other';
-    const members = ['me', ...[...document.querySelectorAll('#memberCheckboxes input:checked')].map(c => c.value)];
-    const group = { id: Store.uid(), name, type, members };
-    Store.groups.push(group);
-    Store.persist();
-    UI.closeModal('modalGroup');
-    UI.toast(`Group "${name}" created!`);
-    UI.renderGroups();
-  },
-
-  /* ── Save expense ────────────────────────────────────── */
-  saveExpense() {
-    const desc   = document.getElementById('expDesc').value.trim();
-    const amount = parseFloat(document.getElementById('expAmount').value);
-    if (!desc)         { UI.toast('Add a description'); return; }
-    if (!amount || amount <= 0) { UI.toast('Enter a valid amount'); return; }
-
-    const category   = document.querySelector('.cat-chip.active')?.dataset.id || 'other';
-    const paidBy     = document.getElementById('expPaidBy').value;
-    const groupId    = document.getElementById('expGroup').value || null;
-    const note       = document.getElementById('expNote').value.trim();
-    const date       = document.getElementById('expDate').value || today();
-    const recurring  = document.getElementById('expRecurring').checked;
-    const recurFreq  = recurring ? document.getElementById('expRecurFreq').value : null;
-
-    // Build splits
-    const splitType = document.querySelector('.split-type.active')?.dataset.type || 'equal';
-    const checkedMembers = [...document.querySelectorAll('.split-member-check:checked')].map(c => c.value);
-    if (!checkedMembers.length) { UI.toast('Select at least one person to split with'); return; }
-
-    let splits = [];
-    if (splitType === 'equal') {
-      const share = amount / checkedMembers.length;
-      splits = checkedMembers.map(id => ({ personId: id, amount: round2(share) }));
-    } else if (splitType === 'percent') {
-      let total = 0;
-      splits = checkedMembers.map(id => {
-        const pct = parseFloat(document.getElementById(`scv_${id}`)?.value) || 0;
-        const amt = round2(amount * pct / 100);
-        total += amt;
-        return { personId: id, amount: amt };
-      });
-    } else {
-      splits = checkedMembers.map(id => {
-        const amt = round2(parseFloat(document.getElementById(`scv_${id}`)?.value) || 0);
-        return { personId: id, amount: amt };
-      });
-    }
-
-    const expense = {
-      id: Store.uid(), desc, amount, category, paidBy,
-      groupId, note, date, recurring, recurFreq, splits,
-      deleted: false, createdAt: new Date().toISOString(),
-    };
-    Store.expenses.push(expense);
-    Store.persist();
-    UI.closeModal('modalExpense');
-    UI.toast(`"${desc}" added!`);
-
-    // Refresh current page
-    if (App.currentGroupId && groupId === App.currentGroupId) {
-      UI.renderGroupDetail(App.currentGroupId);
-    }
-    UI.renderHome();
-  },
-
-  /* ── Confirm settle ──────────────────────────────────── */
-  confirmSettle() {
-    if (!this.pendingSettle) return;
-    const { fromId, toId, amount } = this.pendingSettle;
-    Store.payments.push({
-      id: Store.uid(), payer: fromId, payee: toId,
-      amount: round2(amount), date: today(),
-      deleted: false, createdAt: new Date().toISOString(),
+  _updateBillTotal() {
+    let sum = 0;
+    this._billPeople.forEach((_, i) => {
+      const v = parseFloat(document.getElementById(`bsplit_${i}`)?.value) || 0;
+      sum += v;
     });
-    Store.persist();
-    UI.closeModal('modalSettle');
-    UI.toast('Payment recorded! ✅');
-    UI.renderHome();
-    if (App.currentGroupId) UI.renderGroupDetail(App.currentGroupId);
-    this.pendingSettle = null;
+    const total = document.getElementById('billSplitTotal');
+    const bAmt  = parseFloat(document.getElementById('bAmount').value) || 0;
+    total.textContent = fmt(sum);
+    if (bAmt > 0 && Math.abs(sum - bAmt) < 0.01) {
+      total.className = 'split-total-val exact';
+    } else if (sum > bAmt && bAmt > 0) {
+      total.className = 'split-total-val over';
+    } else {
+      total.className = 'split-total-val';
+    }
+  },
+
+  _removeBillPerson(idx) {
+    this._billPeople.splice(idx, 1);
+    this._renderBillFriendPicker();
+    this._renderBillSplitRows();
+  },
+
+  /* ── Create Group ────────────────────────────────────── */
+  openCreateGroup() {
+    this._groupMembers = [];
+    document.getElementById('gName').value = '';
+    document.getElementById('gPersonName').value    = '';
+    document.getElementById('gPersonContact').value = '';
+    // reset type picker
+    document.querySelectorAll('.type-chip').forEach((c, i) => c.classList.toggle('active', i === 0));
+    this._renderGroupFriendPicker();
+    this._renderGroupMemberTags();
+    this.open('modalCreateGroup');
+  },
+
+  _renderGroupFriendPicker() {
+    const picked = this._groupMembers.map(m => m.contact);
+    document.getElementById('groupFriendPicker').innerHTML = Store.friends.map(f =>
+      `<span class="fp-chip ${picked.includes(f.contact)?'selected':''}"
+        onclick="Modals._toggleGroupMember('${f.id}')">${esc(f.name)}</span>`
+    ).join('') || '<span style="color:var(--text3);font-size:.8rem">No friends yet</span>';
+  },
+
+  _toggleGroupMember(friendId) {
+    const f = Store.getFriend(friendId);
+    if (!f) return;
+    const idx = this._groupMembers.findIndex(m => m.contact === f.contact);
+    if (idx >= 0) this._groupMembers.splice(idx, 1);
+    else this._groupMembers.push({ name: f.name, contact: f.contact });
+    this._renderGroupFriendPicker();
+    this._renderGroupMemberTags();
+  },
+
+  _renderGroupMemberTags() {
+    document.getElementById('groupMembersList').innerHTML = this._groupMembers.map((m, i) =>
+      `<span class="member-tag">${esc(m.name)}
+        <button class="member-tag-remove" onclick="Modals._removeGroupMember(${i})">✕</button>
+      </span>`
+    ).join('') || '<span style="color:var(--text3);font-size:.8rem">No members added</span>';
+  },
+
+  _removeGroupMember(idx) {
+    this._groupMembers.splice(idx, 1);
+    this._renderGroupFriendPicker();
+    this._renderGroupMemberTags();
+  },
+
+  /* ── Add Group Expense ────────────────────────────────── */
+  openAddGroupExpense(groupId) {
+    this._activeGroupId = groupId;
+    const group = Store.getGroup(groupId);
+    if (!group) return;
+    document.getElementById('geName').value   = '';
+    document.getElementById('geAmount').value = '';
+    document.getElementById('geDate').value   = today();
+    document.getElementById('geNote').value   = '';
+
+    // Pre-fill split rows for each member
+    const rows = document.getElementById('groupExpSplitRows');
+    rows.innerHTML = group.members.map((fid, i) => {
+      const f = Store.getFriend(fid);
+      return `<div class="split-row">
+        <span class="split-row-name">${esc(f?.name||'?')}</span>
+        <input class="split-row-input" type="number" inputmode="decimal"
+          id="gesplit_${fid}" placeholder="0" oninput="Modals._updateGroupExpTotal()"/>
+      </div>`;
+    }).join('');
+    document.getElementById('groupExpSplitTotal').textContent = '₹0';
+    this.open('modalAddGroupExpense');
+  },
+
+  _updateGroupExpTotal() {
+    const group = Store.getGroup(this._activeGroupId);
+    if (!group) return;
+    let sum = 0;
+    group.members.forEach(fid => {
+      sum += parseFloat(document.getElementById(`gesplit_${fid}`)?.value) || 0;
+    });
+    const total = document.getElementById('groupExpSplitTotal');
+    const gAmt  = parseFloat(document.getElementById('geAmount').value) || 0;
+    total.textContent = fmt(sum);
+    total.className = gAmt > 0 && Math.abs(sum - gAmt) < 0.01
+      ? 'split-total-val exact'
+      : sum > gAmt && gAmt > 0 ? 'split-total-val over' : 'split-total-val';
+  },
+
+  /* ── Settle ──────────────────────────────────────────── */
+  openSettle(desc, amount, onConfirm) {
+    this._pendingSettle = onConfirm;
+    document.getElementById('settleBody').innerHTML = `
+      <div class="settle-info">
+        <div class="settle-desc">${desc}</div>
+        <div class="settle-amt">${fmt(amount)}</div>
+        <div class="settle-note">This will be marked as settled and moved to history.</div>
+      </div>`;
+    this.open('modalSettle');
   },
 };
 
-/* ══════════════════════════════════════════════════════════════
-   REMINDERS  – recurring expense scheduler
-══════════════════════════════════════════════════════════════ */
-const Reminders = {
-  check() {
-    const now = new Date();
-    const todayStr = today();
+/* ══════════════════════════════════════════════════════
+   ACTIONS – all business logic
+══════════════════════════════════════════════════════ */
+const Actions = {
 
-    Store.expenses
-      .filter(e => e.recurring && !e.deleted)
-      .forEach(e => {
-        const last = new Date(e.date);
-        let nextDate = new Date(last);
+  /* ── Add Friend ─────────────────────────────────────── */
+  addFriend() {
+    const name    = document.getElementById('fName').value.trim();
+    const contact = document.getElementById('fContact').value.trim();
+    if (!name)    { toast('⚠️ Please enter a name'); return; }
+    if (!contact) { toast('⚠️ Please enter phone or email'); return; }
 
-        if (e.recurFreq === 'weekly')  nextDate.setDate(last.getDate() + 7);
-        if (e.recurFreq === 'monthly') nextDate.setMonth(last.getMonth() + 1);
-        if (e.recurFreq === 'yearly')  nextDate.setFullYear(last.getFullYear() + 1);
+    if (Store.findByContact(contact)) {
+      toast('⚠️ Friend with this contact already exists!'); return;
+    }
+    Store.upsertFriend(name, contact);
+    Modals.close('modalAddFriend');
+    toast(`✓ ${name} added!`);
+    Render.home();
+  },
 
-        const nextStr = nextDate.toISOString().slice(0, 10);
-        if (nextStr <= todayStr) {
-          // Auto-create a copy
-          const copy = {
-            ...e, id: Store.uid(), date: nextStr,
-            createdAt: new Date().toISOString(),
-          };
-          // Update original's date so it rolls forward
-          e.date = nextStr;
-          Store.expenses.push(copy);
-          Store.persist();
-          UI.toast(`🔁 Recurring: "${e.desc}" added`);
+  /* ── Save Bill ──────────────────────────────────────── */
+  saveBill() {
+    const name   = document.getElementById('bName').value.trim();
+    const amount = parseFloat(document.getElementById('bAmount').value);
+    const date   = document.getElementById('bDate').value || today();
+    const note   = document.getElementById('bNote').value.trim();
+
+    if (!name)          { toast('⚠️ Enter a bill name'); return; }
+    if (!amount || amount <= 0) { toast('⚠️ Enter a valid amount'); return; }
+    if (!Modals._billPeople.length) { toast('⚠️ Add at least one person'); return; }
+
+    // Collect splits
+    const splits = [];
+    let totalAssigned = 0;
+    for (let i = 0; i < Modals._billPeople.length; i++) {
+      const p   = Modals._billPeople[i];
+      const amt = parseFloat(document.getElementById(`bsplit_${i}`)?.value) || 0;
+      if (amt <= 0) { toast(`⚠️ Enter amount for ${p.name}`); return; }
+      totalAssigned += amt;
+
+      // upsert friend (adds them if new)
+      const friend = Store.upsertFriend(p.name, p.contact);
+      splits.push({ friendId: friend.id, amount: r2(amt), settled: false });
+    }
+
+    // Validate total
+    if (Math.abs(totalAssigned - amount) > 0.5) {
+      toast(`⚠️ Split total ${fmt(totalAssigned)} doesn't match bill ${fmt(amount)}`); return;
+    }
+
+    Store.bills.push({ id: uid(), name, amount: r2(amount), date, note, splits });
+    Store.save();
+    Modals.close('modalAddBill');
+    toast(`✓ Bill "${name}" saved!`);
+    Render.bills();
+    Render.home();
+  },
+
+  /* ── Save Group ─────────────────────────────────────── */
+  saveGroup() {
+    const name = document.getElementById('gName').value.trim();
+    if (!name) { toast('⚠️ Enter a group name'); return; }
+    if (!Modals._groupMembers.length) { toast('⚠️ Add at least one member'); return; }
+
+    const type = document.querySelector('.type-chip.active')?.dataset.val || 'other';
+
+    // Upsert all members
+    const memberIds = Modals._groupMembers.map(m => Store.upsertFriend(m.name, m.contact).id);
+
+    Store.groups.push({ id: uid(), name, type, members: memberIds, expenses: [] });
+    Store.save();
+    Modals.close('modalCreateGroup');
+    toast(`✓ Group "${name}" created!`);
+    Render.groups();
+  },
+
+  /* ── Save Group Expense ─────────────────────────────── */
+  saveGroupExpense() {
+    const groupId = Modals._activeGroupId;
+    const group   = Store.getGroup(groupId);
+    if (!group) return;
+
+    const name   = document.getElementById('geName').value.trim();
+    const amount = parseFloat(document.getElementById('geAmount').value);
+    const date   = document.getElementById('geDate').value || today();
+    const note   = document.getElementById('geNote').value.trim();
+
+    if (!name)   { toast('⚠️ Enter expense name'); return; }
+    if (!amount || amount <= 0) { toast('⚠️ Enter a valid amount'); return; }
+
+    const splits = [];
+    let totalAssigned = 0;
+    for (const fid of group.members) {
+      const amt = parseFloat(document.getElementById(`gesplit_${fid}`)?.value) || 0;
+      if (amt > 0) {
+        splits.push({ friendId: fid, amount: r2(amt), settled: false });
+        totalAssigned += amt;
+      }
+    }
+
+    if (!splits.length) { toast('⚠️ Enter at least one person\'s share'); return; }
+    if (Math.abs(totalAssigned - amount) > 0.5) {
+      toast(`⚠️ Split total ${fmt(totalAssigned)} doesn't match ${fmt(amount)}`); return;
+    }
+
+    group.expenses.push({ id: uid(), name, amount: r2(amount), date, note, splits });
+    Store.save();
+    Modals.close('modalAddGroupExpense');
+    toast(`✓ "${name}" added to group!`);
+    Render.groupDetail(groupId);
+    Render.home();
+  },
+
+  /* ── Settle: single transaction from friend detail page */
+  settleTransaction(friendId, sourceId, expId, type) {
+    let amount = 0;
+    if (type === 'bill') {
+      const bill = Store.getBill(sourceId);
+      const sp = bill?.splits.find(s => s.friendId === friendId);
+      amount = sp?.amount || 0;
+    } else {
+      const group = Store.getGroup(sourceId);
+      const exp   = group?.expenses.find(e => e.id === expId);
+      const sp    = exp?.splits.find(s => s.friendId === friendId);
+      amount = sp?.amount || 0;
+    }
+    const f = Store.getFriend(friendId);
+    Modals.openSettle(
+      `Settle with <strong>${esc(f?.name||'?')}</strong>`,
+      amount,
+      () => this._doSettleTransaction(friendId, sourceId, expId, type)
+    );
+  },
+
+  _doSettleTransaction(friendId, sourceId, expId, type) {
+    const now = today();
+    if (type === 'bill') {
+      const bill = Store.getBill(sourceId);
+      const sp   = bill?.splits.find(s => s.friendId === friendId);
+      if (sp && !sp.settled) {
+        sp.settled = true;
+        Store.history.push({ id: uid(), name: bill.name, detail: `Bill with ${Store.getFriend(friendId)?.name}`, amount: sp.amount, settledAt: now });
+      }
+    } else {
+      const group = Store.getGroup(sourceId);
+      const exp   = group?.expenses.find(e => e.id === expId);
+      const sp    = exp?.splits.find(s => s.friendId === friendId);
+      if (sp && !sp.settled) {
+        sp.settled = true;
+        Store.history.push({ id: uid(), name: exp.name, detail: `Group expense with ${Store.getFriend(friendId)?.name}`, amount: sp.amount, settledAt: now });
+      }
+    }
+    Store.save();
+    Modals.close('modalSettle');
+    toast('✓ Settled!');
+    // Refresh current view
+    Render.friendDetail(friendId);
+    Render.home();
+  },
+
+  /* ── Settle all with one friend ─────────────────────── */
+  settleAllWithFriend(friendId) {
+    const f = Store.getFriend(friendId);
+    const txns = Calc.friendTransactions(friendId).filter(t => !t.settled);
+    const total = r2(txns.reduce((s, t) => s + t.amount, 0));
+    Modals.openSettle(
+      `Settle ALL with <strong>${esc(f?.name||'?')}</strong>`,
+      total,
+      () => {
+        const now = today();
+        for (const t of txns) {
+          if (t.type === 'bill') {
+            const sp = Store.getBill(t.sourceId)?.splits.find(s => s.friendId === friendId);
+            if (sp) { sp.settled = true; Store.history.push({ id: uid(), name: t.name, detail: `Bill`, amount: sp.amount, settledAt: now }); }
+          } else {
+            const group = Store.getGroup(t.sourceId);
+            const exp   = group?.expenses.find(e => e.id === t.expId);
+            const sp    = exp?.splits.find(s => s.friendId === friendId);
+            if (sp) { sp.settled = true; Store.history.push({ id: uid(), name: t.name, detail: `Group`, amount: sp.amount, settledAt: now }); }
+          }
         }
-      });
+        Store.save();
+        Modals.close('modalSettle');
+        toast(`✓ All settled with ${f?.name}!`);
+        Render.friendDetail(friendId);
+        Render.home();
+      }
+    );
+  },
+
+  /* ── Settle bill split (from bill detail page) ───────── */
+  settleBillSplit(billId, friendId) {
+    const bill = Store.getBill(billId);
+    const sp   = bill?.splits.find(s => s.friendId === friendId);
+    if (!sp || sp.settled) return;
+    const f = Store.getFriend(friendId);
+    Modals.openSettle(
+      `${esc(f?.name||'?')} settles their share of <strong>${esc(bill.name)}</strong>`,
+      sp.amount,
+      () => {
+        sp.settled = true;
+        Store.history.push({ id: uid(), name: bill.name, detail: `Bill with ${f?.name}`, amount: sp.amount, settledAt: today() });
+        Store.save();
+        Modals.close('modalSettle');
+        toast('✓ Settled!');
+        Render.billDetail(billId);
+        Render.home();
+      }
+    );
+  },
+
+  /* ── Settle one member in group ─────────────────────── */
+  settleGroupMember(groupId, friendId, amount) {
+    const f = Store.getFriend(friendId);
+    const group = Store.getGroup(groupId);
+    Modals.openSettle(
+      `Settle <strong>${esc(f?.name||'?')}</strong> in <strong>${esc(group?.name||'?')}</strong>`,
+      amount,
+      () => {
+        const now = today();
+        for (const exp of group.expenses) {
+          const sp = exp.splits.find(s => s.friendId === friendId);
+          if (sp && !sp.settled) {
+            sp.settled = true;
+            Store.history.push({ id: uid(), name: exp.name, detail: `${group.name} · ${f?.name}`, amount: sp.amount, settledAt: now });
+          }
+        }
+        Store.save();
+        Modals.close('modalSettle');
+        toast(`✓ ${f?.name} settled in ${group.name}!`);
+        Render.groupDetail(groupId);
+        Render.home();
+      }
+    );
+  },
+
+  /* ── Settle everyone in group ────────────────────────── */
+  settleAllInGroup(groupId) {
+    const group = Store.getGroup(groupId);
+    const bals  = Calc.groupBalances(groupId);
+    const total = r2(bals.reduce((s, b) => s + b.amount, 0));
+    Modals.openSettle(
+      `Settle everyone in <strong>${esc(group?.name||'?')}</strong>`,
+      total,
+      () => {
+        const now = today();
+        for (const exp of group.expenses) {
+          for (const sp of exp.splits) {
+            if (!sp.settled) {
+              sp.settled = true;
+              const f = Store.getFriend(sp.friendId);
+              Store.history.push({ id: uid(), name: exp.name, detail: `${group.name} · ${f?.name}`, amount: sp.amount, settledAt: now });
+            }
+          }
+        }
+        Store.save();
+        Modals.close('modalSettle');
+        toast(`✓ All settled in ${group.name}!`);
+        Render.groupDetail(groupId);
+        Render.home();
+      }
+    );
+  },
+
+  /* ── Delete group ────────────────────────────────────── */
+  deleteGroup(groupId) {
+    const group = Store.getGroup(groupId);
+    if (!confirm(`Delete group "${group?.name}"? This cannot be undone.`)) return;
+    Store.groups = Store.groups.filter(g => g.id !== groupId);
+    Store.save();
+    toast('Group deleted');
+    Nav.back();
+    Render.groups();
+  },
+
+  /* ── Add person to bill (inline) ─────────────────────── */
+  addPersonToBill() {
+    const name    = document.getElementById('bPersonName').value.trim();
+    const contact = document.getElementById('bPersonContact').value.trim();
+    if (!name || !contact) { toast('⚠️ Enter name and phone/email'); return; }
+    if (Modals._billPeople.find(p => p.contact.toLowerCase() === contact.toLowerCase())) {
+      toast('⚠️ Person already added'); return;
+    }
+    Modals._billPeople.push({ name, contact });
+    document.getElementById('bPersonName').value    = '';
+    document.getElementById('bPersonContact').value = '';
+    Modals._renderBillFriendPicker();
+    Modals._renderBillSplitRows();
+  },
+
+  /* ── Add person to group (inline) ────────────────────── */
+  addPersonToGroup() {
+    const name    = document.getElementById('gPersonName').value.trim();
+    const contact = document.getElementById('gPersonContact').value.trim();
+    if (!name || !contact) { toast('⚠️ Enter name and phone/email'); return; }
+    if (Modals._groupMembers.find(m => m.contact.toLowerCase() === contact.toLowerCase())) {
+      toast('⚠️ Person already added'); return;
+    }
+    Modals._groupMembers.push({ name, contact });
+    document.getElementById('gPersonName').value    = '';
+    document.getElementById('gPersonContact').value = '';
+    Modals._renderGroupFriendPicker();
+    Modals._renderGroupMemberTags();
+  },
+
+  /* ── Confirm settle (from modal) ─────────────────────── */
+  confirmSettle() {
+    if (Modals._pendingSettle) Modals._pendingSettle();
   },
 };
 
-/* ══════════════════════════════════════════════════════════════
-   HELPERS
-══════════════════════════════════════════════════════════════ */
-const fmt = n => '₹' + Math.abs(n).toFixed(0).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
-const round2 = n => Math.round(n * 100) / 100;
-const today = () => new Date().toISOString().slice(0, 10);
-const initials = name => name.split(' ').map(w => w[0]).join('').toUpperCase().slice(0, 2);
-const formatDate = str => {
-  const d = new Date(str);
-  return d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' });
-};
+/* ══════════════════════════════════════════════════════
+   UTILS
+══════════════════════════════════════════════════════ */
+const initials = name => (name||'?').split(' ').map(w=>w[0]).join('').toUpperCase().slice(0,2);
+const esc = s => String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 
-function expenseHTML(e) {
-  const cat = CATEGORIES.find(c => c.id === e.category) || CATEGORIES[9];
-  const paidByMe = e.paidBy === 'me';
-  const myShare = e.splits.find(s => s.personId === 'me')?.amount || 0;
-  const shareClass = paidByMe ? 'lent' : 'owe';
-  const shareLabel = paidByMe ? `you lent ${fmt(e.amount - myShare)}` : `you owe ${fmt(myShare)}`;
-  return `
-    <div class="expense-item">
-      <div class="exp-cat-icon">${cat.icon}</div>
-      <div class="exp-info">
-        <div class="exp-desc">${e.desc}${e.recurring ? '<span class="exp-recurring">🔁 recurring</span>' : ''}</div>
-        <div class="exp-meta">${formatDate(e.date)} · ${Store.getPerson(e.paidBy)?.name || '?'} paid</div>
-      </div>
-      <div class="exp-right">
-        <div class="exp-amount">${fmt(e.amount)}</div>
-        <div class="exp-share ${shareClass}">${shareLabel}</div>
-      </div>
-    </div>`;
-}
+/* ══════════════════════════════════════════════════════
+   TYPE PICKER INIT
+══════════════════════════════════════════════════════ */
+document.addEventListener('DOMContentLoaded', () => {
+  // Type chip toggle
+  document.querySelectorAll('.type-chip').forEach(chip => {
+    chip.addEventListener('click', () => {
+      document.querySelectorAll('.type-chip').forEach(c => c.classList.remove('active'));
+      chip.classList.add('active');
+    });
+  });
+});
 
-/* ══════════════════════════════════════════════════════════════
+/* ══════════════════════════════════════════════════════
    BOOT
-══════════════════════════════════════════════════════════════ */
+══════════════════════════════════════════════════════ */
 window.addEventListener('DOMContentLoaded', () => {
   Store.init();
-  UI.init();
-  Reminders.check();
 
-  // Register service worker for PWA
+  // Back button
+  document.getElementById('backBtn').addEventListener('click', () => Nav.back());
+
+  // Register PWA service worker
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('sw.js').catch(() => {});
   }
 
-  // Hide splash and show app
+  // Bill amount input triggers total update
+  document.getElementById('bAmount').addEventListener('input', () => Modals._updateBillTotal());
+  document.getElementById('geAmount').addEventListener('input', () => Modals._updateGroupExpTotal());
+
+  // Hide splash, show app
   setTimeout(() => {
     document.getElementById('app').classList.remove('hidden');
-    UI.renderHome();
-  }, 2000);
+    Render.home();
+  }, 2100);
 });
