@@ -5,9 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover"/>
   <meta name="theme-color" content="#7c3aed"/>
   <meta name="apple-mobile-web-app-capable" content="yes"/>
-  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
   <meta name="apple-mobile-web-app-title" content="FairShare"/>
-  <meta name="description" content="Split expenses fairly with friends and groups"/>
   <link rel="manifest" href="manifest.json"/>
   <link rel="preconnect" href="https://fonts.googleapis.com"/>
   <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet"/>
@@ -16,294 +14,306 @@
 </head>
 <body>
 
-<!-- ══ SPLASH ══════════════════════════════════════════════ -->
+<!-- ── SPLASH ──────────────────────────────────────────── -->
 <div id="splash" class="splash">
-  <div class="splash-logo">
-    <div class="splash-icon">⚖️</div>
-    <h1 class="splash-name">FairShare</h1>
-    <p class="splash-tag">Split smarter. Settle faster.</p>
-  </div>
+  <div class="splash-icon">⚖️</div>
+  <div class="splash-name">FairShare</div>
+  <div class="splash-tag">Split smarter. Settle faster.</div>
 </div>
 
-<!-- ══ APP SHELL ════════════════════════════════════════════ -->
+<!-- ── APP ─────────────────────────────────────────────── -->
 <div id="app" class="app hidden">
 
-  <!-- TOP BAR -->
+  <!-- TOPBAR -->
   <header class="topbar" id="topbar">
-    <button class="topbar-back hidden" id="backBtn">‹</button>
+    <button class="back-btn hidden" id="backBtn">‹</button>
     <div class="topbar-title" id="topbarTitle">FairShare</div>
-    <button class="topbar-action" id="topbarAction"></button>
+    <div class="topbar-right" id="topbarRight"></div>
   </header>
 
-  <!-- PAGES -->
-  <main class="pages" id="pages">
+  <!-- PAGE CONTAINER -->
+  <div class="page-container" id="pageContainer">
 
-    <!-- ── PAGE: HOME ───────────────────────────────────── -->
-    <section class="page active" id="pageHome">
-      <!-- Balance summary card -->
-      <div class="balance-hero">
-        <div class="balance-label">Total you are owed</div>
-        <div class="balance-amount" id="heroOwed">₹0</div>
-        <div class="balance-sub">
-          <span class="bal-chip owe" id="heroOwe">You owe ₹0</span>
-          <span class="bal-chip own" id="heroOwn">Owed to you ₹0</span>
+    <!-- ── HOME ──────────────────────────────────────── -->
+    <div class="page active" id="pageHome">
+      <!-- Summary card -->
+      <div class="summary-card">
+        <div class="summary-row">
+          <div class="summary-item">
+            <div class="summary-label">You are owed</div>
+            <div class="summary-val green" id="totalOwed">₹0</div>
+          </div>
+          <div class="summary-divider"></div>
+          <div class="summary-item">
+            <div class="summary-label">You owe</div>
+            <div class="summary-val red" id="totalOwe">₹0</div>
+          </div>
+          <div class="summary-divider"></div>
+          <div class="summary-item">
+            <div class="summary-label">Net balance</div>
+            <div class="summary-val" id="netBalance">₹0</div>
+          </div>
         </div>
       </div>
 
-      <!-- Quick actions -->
-      <div class="quick-actions">
-        <button class="qa-btn" onclick="UI.showPage('pageGroups')">
-          <span class="qa-icon">👥</span>
-          <span>Groups</span>
-        </button>
-        <button class="qa-btn" onclick="UI.openAddExpense()">
-          <span class="qa-icon">➕</span>
-          <span>Add Expense</span>
-        </button>
-        <button class="qa-btn" onclick="UI.showPage('pageActivity')">
-          <span class="qa-icon">📋</span>
-          <span>Activity</span>
-        </button>
-        <button class="qa-btn" onclick="UI.showPage('pageAnalytics')">
-          <span class="qa-icon">📊</span>
-          <span>Analytics</span>
-        </button>
-      </div>
-
-      <!-- Friends balances -->
-      <div class="section-header">
+      <!-- Friends -->
+      <div class="section-hdr">
         <span class="section-title">Friends</span>
-        <button class="section-action" onclick="UI.openAddFriend()">+ Add</button>
+        <button class="btn-add" onclick="Modals.openAddFriend()">+ Add Friend</button>
       </div>
-      <div class="friends-list" id="friendsList">
-        <div class="empty-state">
-          <div class="empty-icon">👋</div>
-          <p>Add friends to start splitting</p>
-        </div>
-      </div>
-    </section>
+      <div id="friendsList" class="card-list"></div>
+    </div>
 
-    <!-- ── PAGE: GROUPS ─────────────────────────────────── -->
-    <section class="page" id="pageGroups">
-      <div class="section-header">
-        <span class="section-title">Your Groups</span>
-        <button class="section-action" onclick="UI.openCreateGroup()">+ New</button>
-      </div>
-      <div class="groups-list" id="groupsList">
-        <div class="empty-state">
-          <div class="empty-icon">🏠</div>
-          <p>No groups yet. Create one!</p>
-        </div>
-      </div>
-    </section>
+    <!-- ── FRIEND DETAIL ──────────────────────────────── -->
+    <div class="page" id="pageFriendDetail">
+      <div class="friend-detail-header" id="friendDetailHeader"></div>
+      <div class="section-hdr"><span class="section-title">All Transactions</span></div>
+      <div id="friendTransactions" class="card-list"></div>
+      <div class="bottom-action" id="friendSettleAll"></div>
+    </div>
 
-    <!-- ── PAGE: GROUP DETAIL ───────────────────────────── -->
-    <section class="page" id="pageGroupDetail">
-      <div class="group-hero" id="groupHero"></div>
-      <div class="group-balances" id="groupBalances"></div>
-      <div class="section-header">
+    <!-- ── BILLS ──────────────────────────────────────── -->
+    <div class="page" id="pageBills">
+      <div class="section-hdr">
+        <span class="section-title">Individual Bills</span>
+        <button class="btn-add" onclick="Modals.openAddBill()">+ Add Bill</button>
+      </div>
+      <div id="billsList" class="card-list"></div>
+    </div>
+
+    <!-- ── BILL DETAIL ────────────────────────────────── -->
+    <div class="page" id="pageBillDetail">
+      <div class="bill-detail-header" id="billDetailHeader"></div>
+      <div class="section-hdr"><span class="section-title">Who owes what</span></div>
+      <div id="billSplits" class="card-list"></div>
+    </div>
+
+    <!-- ── GROUPS ─────────────────────────────────────── -->
+    <div class="page" id="pageGroups">
+      <div class="section-hdr">
+        <span class="section-title">Groups</span>
+        <button class="btn-add" onclick="Modals.openCreateGroup()">+ New Group</button>
+      </div>
+      <div id="groupsList" class="card-list"></div>
+    </div>
+
+    <!-- ── GROUP DETAIL ───────────────────────────────── -->
+    <div class="page" id="pageGroupDetail">
+      <div class="group-detail-header" id="groupDetailHeader"></div>
+      <div class="section-hdr">
+        <span class="section-title">Balances</span>
+      </div>
+      <div id="groupBalances" class="card-list"></div>
+      <div class="section-hdr" style="margin-top:16px">
         <span class="section-title">Expenses</span>
-        <button class="section-action" onclick="UI.openAddExpense(App.currentGroupId)">+ Add</button>
+        <button class="btn-add" id="addGroupExpenseBtn">+ Add</button>
       </div>
-      <div class="expense-list" id="groupExpenses"></div>
-    </section>
+      <div id="groupExpenses" class="card-list"></div>
+      <div class="bottom-action" id="groupActions"></div>
+    </div>
 
-    <!-- ── PAGE: ACTIVITY ───────────────────────────────── -->
-    <section class="page" id="pageActivity">
-      <div class="filter-bar">
-        <button class="filter-btn active" data-filter="all">All</button>
-        <button class="filter-btn" data-filter="expense">Expenses</button>
-        <button class="filter-btn" data-filter="payment">Payments</button>
-      </div>
-      <div class="activity-list" id="activityList">
-        <div class="empty-state">
-          <div class="empty-icon">📭</div>
-          <p>No activity yet</p>
-        </div>
-      </div>
-    </section>
+    <!-- ── HISTORY ────────────────────────────────────── -->
+    <div class="page" id="pageHistory">
+      <div class="section-hdr"><span class="section-title">Settled (last 30 days)</span></div>
+      <div id="historyList" class="card-list"></div>
+    </div>
 
-    <!-- ── PAGE: ANALYTICS ──────────────────────────────── -->
-    <section class="page" id="pageAnalytics">
-      <div class="analytics-cards" id="analyticsCards"></div>
-      <div class="section-header"><span class="section-title">Spending by Category</span></div>
-      <div class="category-bars" id="categoryBars"></div>
-      <div class="section-header"><span class="section-title">Monthly Trend</span></div>
-      <div class="trend-chart" id="trendChart"></div>
-    </section>
-
-  </main>
+  </div>
 
   <!-- BOTTOM NAV -->
   <nav class="bottom-nav">
-    <button class="nav-btn active" data-page="pageHome">
+    <button class="nav-btn active" data-page="pageHome" onclick="Nav.go('pageHome',this)">
       <span class="nav-icon">🏠</span>
       <span class="nav-lbl">Home</span>
     </button>
-    <button class="nav-btn" data-page="pageGroups">
+    <button class="nav-btn" data-page="pageBills" onclick="Nav.go('pageBills',this)">
+      <span class="nav-icon">🧾</span>
+      <span class="nav-lbl">Bills</span>
+    </button>
+    <button class="nav-fab" onclick="Modals.openAddBill()">＋</button>
+    <button class="nav-btn" data-page="pageGroups" onclick="Nav.go('pageGroups',this)">
       <span class="nav-icon">👥</span>
       <span class="nav-lbl">Groups</span>
     </button>
-    <button class="nav-btn fab-center" onclick="UI.openAddExpense()">
-      <span class="nav-fab">＋</span>
-    </button>
-    <button class="nav-btn" data-page="pageActivity">
-      <span class="nav-icon">📋</span>
-      <span class="nav-lbl">Activity</span>
-    </button>
-    <button class="nav-btn" data-page="pageAnalytics">
-      <span class="nav-icon">📊</span>
-      <span class="nav-lbl">Analytics</span>
+    <button class="nav-btn" data-page="pageHistory" onclick="Nav.go('pageHistory',this)">
+      <span class="nav-icon">🕐</span>
+      <span class="nav-lbl">History</span>
     </button>
   </nav>
 
-</div><!-- /app -->
+</div>
 
-<!-- ══ MODALS ════════════════════════════════════════════════ -->
+<!-- ══ MODALS ════════════════════════════════════════════ -->
 
-<!-- Add Expense Modal -->
-<div class="modal-overlay hidden" id="modalExpense">
-  <div class="modal slide-up">
-    <div class="modal-header">
-      <h2 class="modal-title">Add Expense</h2>
-      <button class="modal-close" onclick="UI.closeModal('modalExpense')">✕</button>
+<!-- Add Friend -->
+<div class="modal-overlay hidden" id="modalAddFriend">
+  <div class="modal">
+    <div class="modal-hdr">
+      <span class="modal-title">Add Friend</span>
+      <button class="modal-close" onclick="Modals.close('modalAddFriend')">✕</button>
     </div>
     <div class="modal-body">
-      <div class="form-group">
-        <label class="form-label">Description</label>
-        <input class="form-input" id="expDesc" placeholder="Dinner, Uber, Hotel..." type="text"/>
+      <div class="form-grp">
+        <label class="form-lbl">Name *</label>
+        <input class="form-inp" id="fName" placeholder="Friend's name" type="text"/>
       </div>
-      <div class="form-group">
-        <label class="form-label">Amount (₹)</label>
-        <input class="form-input amount-input" id="expAmount" placeholder="0" type="number" inputmode="decimal"/>
-      </div>
-      <div class="form-group">
-        <label class="form-label">Category</label>
-        <div class="category-picker" id="categoryPicker"></div>
-      </div>
-      <div class="form-group">
-        <label class="form-label">Paid by</label>
-        <select class="form-select" id="expPaidBy"></select>
-      </div>
-      <div class="form-group">
-        <label class="form-label">Group (optional)</label>
-        <select class="form-select" id="expGroup">
-          <option value="">No group</option>
-        </select>
-      </div>
-      <div class="form-group">
-        <label class="form-label">Split between</label>
-        <div class="split-members" id="splitMembers"></div>
-      </div>
-      <div class="form-group">
-        <label class="form-label">Split type</label>
-        <div class="split-type-btns">
-          <button class="split-type active" data-type="equal">Equal</button>
-          <button class="split-type" data-type="percent">%</button>
-          <button class="split-type" data-type="exact">Exact</button>
-        </div>
-      </div>
-      <div class="split-custom hidden" id="splitCustom"></div>
-      <div class="form-group">
-        <label class="form-label">Recurring</label>
-        <div class="toggle-row">
-          <span class="toggle-label">Repeat this expense</span>
-          <label class="toggle-switch">
-            <input type="checkbox" id="expRecurring"/>
-            <span class="toggle-slider"></span>
-          </label>
-        </div>
-        <select class="form-select hidden" id="expRecurFreq" style="margin-top:8px">
-          <option value="weekly">Weekly</option>
-          <option value="monthly" selected>Monthly</option>
-          <option value="yearly">Yearly</option>
-        </select>
-      </div>
-      <div class="form-group">
-        <label class="form-label">Date</label>
-        <input class="form-input" id="expDate" type="date"/>
-      </div>
-      <div class="form-group">
-        <label class="form-label">Note (optional)</label>
-        <input class="form-input" id="expNote" placeholder="Add a note..." type="text"/>
+      <div class="form-grp">
+        <label class="form-lbl">Phone or Email * (used to avoid duplicates)</label>
+        <input class="form-inp" id="fContact" placeholder="9999999999 or name@email.com" type="text"/>
       </div>
     </div>
-    <div class="modal-footer">
-      <button class="btn-secondary" onclick="UI.closeModal('modalExpense')">Cancel</button>
-      <button class="btn-primary" onclick="App.saveExpense()">Save Expense</button>
+    <div class="modal-ftr">
+      <button class="btn-secondary" onclick="Modals.close('modalAddFriend')">Cancel</button>
+      <button class="btn-primary" onclick="Actions.addFriend()">Add Friend</button>
     </div>
   </div>
 </div>
 
-<!-- Add Friend Modal -->
-<div class="modal-overlay hidden" id="modalFriend">
-  <div class="modal slide-up">
-    <div class="modal-header">
-      <h2 class="modal-title">Add Friend</h2>
-      <button class="modal-close" onclick="UI.closeModal('modalFriend')">✕</button>
+<!-- Add Bill -->
+<div class="modal-overlay hidden" id="modalAddBill">
+  <div class="modal modal-tall">
+    <div class="modal-hdr">
+      <span class="modal-title">Add Bill</span>
+      <button class="modal-close" onclick="Modals.close('modalAddBill')">✕</button>
     </div>
     <div class="modal-body">
-      <div class="form-group">
-        <label class="form-label">Name</label>
-        <input class="form-input" id="friendName" placeholder="Friend's name" type="text"/>
+      <div class="form-grp">
+        <label class="form-lbl">Bill Name *</label>
+        <input class="form-inp" id="bName" placeholder="Dinner, Cab, Hotel..." type="text"/>
       </div>
-      <div class="form-group">
-        <label class="form-label">Phone / Email (optional)</label>
-        <input class="form-input" id="friendContact" placeholder="For reminders" type="text"/>
+      <div class="form-grp">
+        <label class="form-lbl">Total Amount (₹) *</label>
+        <input class="form-inp form-inp-lg" id="bAmount" placeholder="0" type="number" inputmode="decimal"/>
       </div>
-      <div class="form-group">
-        <label class="form-label">Avatar colour</label>
-        <div class="avatar-colours" id="avatarColours"></div>
+      <div class="form-grp">
+        <label class="form-lbl">Date</label>
+        <input class="form-inp" id="bDate" type="date"/>
       </div>
-    </div>
-    <div class="modal-footer">
-      <button class="btn-secondary" onclick="UI.closeModal('modalFriend')">Cancel</button>
-      <button class="btn-primary" onclick="App.saveFriend()">Add Friend</button>
-    </div>
-  </div>
-</div>
-
-<!-- Create Group Modal -->
-<div class="modal-overlay hidden" id="modalGroup">
-  <div class="modal slide-up">
-    <div class="modal-header">
-      <h2 class="modal-title">Create Group</h2>
-      <button class="modal-close" onclick="UI.closeModal('modalGroup')">✕</button>
-    </div>
-    <div class="modal-body">
-      <div class="form-group">
-        <label class="form-label">Group Name</label>
-        <input class="form-input" id="groupName" placeholder="Trip to Goa, Flat 3B..." type="text"/>
+      <div class="form-grp">
+        <label class="form-lbl">Add People to this Bill</label>
+        <div class="inline-add-person">
+          <input class="form-inp" id="bPersonName" placeholder="Name" type="text" style="flex:1"/>
+          <input class="form-inp" id="bPersonContact" placeholder="Phone/Email" type="text" style="flex:1"/>
+          <button class="btn-inline" onclick="Actions.addPersonToBill()">Add</button>
+        </div>
+        <div class="or-divider">— or pick from friends —</div>
+        <div id="billFriendPicker" class="friend-picker"></div>
       </div>
-      <div class="form-group">
-        <label class="form-label">Type</label>
-        <div class="group-type-picker" id="groupTypePicker"></div>
-      </div>
-      <div class="form-group">
-        <label class="form-label">Members</label>
-        <div class="member-checkboxes" id="memberCheckboxes">
-          <div class="empty-state" style="padding:12px 0"><p>Add friends first</p></div>
+      <div class="form-grp">
+        <label class="form-lbl">People & their share</label>
+        <div id="billSplitRows" class="split-rows"></div>
+        <div class="split-total-row">
+          <span>Total assigned:</span>
+          <span id="billSplitTotal" class="split-total-val">₹0</span>
         </div>
       </div>
+      <div class="form-grp">
+        <label class="form-lbl">Note (optional)</label>
+        <input class="form-inp" id="bNote" placeholder="Add a note..." type="text"/>
+      </div>
     </div>
-    <div class="modal-footer">
-      <button class="btn-secondary" onclick="UI.closeModal('modalGroup')">Cancel</button>
-      <button class="btn-primary" onclick="App.saveGroup()">Create Group</button>
+    <div class="modal-ftr">
+      <button class="btn-secondary" onclick="Modals.close('modalAddBill')">Cancel</button>
+      <button class="btn-primary" onclick="Actions.saveBill()">Save Bill</button>
     </div>
   </div>
 </div>
 
-<!-- Settle Up Modal -->
+<!-- Create Group -->
+<div class="modal-overlay hidden" id="modalCreateGroup">
+  <div class="modal">
+    <div class="modal-hdr">
+      <span class="modal-title">Create Group</span>
+      <button class="modal-close" onclick="Modals.close('modalCreateGroup')">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-grp">
+        <label class="form-lbl">Group Name *</label>
+        <input class="form-inp" id="gName" placeholder="Trip to Goa, Flat 3B..." type="text"/>
+      </div>
+      <div class="form-grp">
+        <label class="form-lbl">Type</label>
+        <div class="type-picker" id="groupTypePicker">
+          <button class="type-chip active" data-val="trip">✈️ Trip</button>
+          <button class="type-chip" data-val="home">🏠 Home</button>
+          <button class="type-chip" data-val="food">🍔 Food</button>
+          <button class="type-chip" data-val="work">💼 Work</button>
+          <button class="type-chip" data-val="other">📦 Other</button>
+        </div>
+      </div>
+      <div class="form-grp">
+        <label class="form-lbl">Add Members</label>
+        <div class="inline-add-person">
+          <input class="form-inp" id="gPersonName" placeholder="Name" type="text" style="flex:1"/>
+          <input class="form-inp" id="gPersonContact" placeholder="Phone/Email" type="text" style="flex:1"/>
+          <button class="btn-inline" onclick="Actions.addPersonToGroup()">Add</button>
+        </div>
+        <div class="or-divider">— or pick from friends —</div>
+        <div id="groupFriendPicker" class="friend-picker"></div>
+      </div>
+      <div class="form-grp">
+        <label class="form-lbl">Members added</label>
+        <div id="groupMembersList" class="member-tags"></div>
+      </div>
+    </div>
+    <div class="modal-ftr">
+      <button class="btn-secondary" onclick="Modals.close('modalCreateGroup')">Cancel</button>
+      <button class="btn-primary" onclick="Actions.saveGroup()">Create Group</button>
+    </div>
+  </div>
+</div>
+
+<!-- Add Group Expense -->
+<div class="modal-overlay hidden" id="modalAddGroupExpense">
+  <div class="modal modal-tall">
+    <div class="modal-hdr">
+      <span class="modal-title">Add Group Expense</span>
+      <button class="modal-close" onclick="Modals.close('modalAddGroupExpense')">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-grp">
+        <label class="form-lbl">Expense Name *</label>
+        <input class="form-inp" id="geName" placeholder="Dinner, Hotel, Cab..." type="text"/>
+      </div>
+      <div class="form-grp">
+        <label class="form-lbl">Total Amount (₹) *</label>
+        <input class="form-inp form-inp-lg" id="geAmount" placeholder="0" type="number" inputmode="decimal"/>
+      </div>
+      <div class="form-grp">
+        <label class="form-lbl">Date</label>
+        <input class="form-inp" id="geDate" type="date"/>
+      </div>
+      <div class="form-grp">
+        <label class="form-lbl">Members & their share</label>
+        <div id="groupExpSplitRows" class="split-rows"></div>
+        <div class="split-total-row">
+          <span>Total assigned:</span>
+          <span id="groupExpSplitTotal" class="split-total-val">₹0</span>
+        </div>
+      </div>
+      <div class="form-grp">
+        <label class="form-lbl">Note (optional)</label>
+        <input class="form-inp" id="geNote" placeholder="Add a note..." type="text"/>
+      </div>
+    </div>
+    <div class="modal-ftr">
+      <button class="btn-secondary" onclick="Modals.close('modalAddGroupExpense')">Cancel</button>
+      <button class="btn-primary" onclick="Actions.saveGroupExpense()">Save Expense</button>
+    </div>
+  </div>
+</div>
+
+<!-- Settle Confirm -->
 <div class="modal-overlay hidden" id="modalSettle">
-  <div class="modal slide-up">
-    <div class="modal-header">
-      <h2 class="modal-title">Settle Up</h2>
-      <button class="modal-close" onclick="UI.closeModal('modalSettle')">✕</button>
+  <div class="modal">
+    <div class="modal-hdr">
+      <span class="modal-title">Settle Up</span>
+      <button class="modal-close" onclick="Modals.close('modalSettle')">✕</button>
     </div>
     <div class="modal-body" id="settleBody"></div>
-    <div class="modal-footer">
-      <button class="btn-secondary" onclick="UI.closeModal('modalSettle')">Cancel</button>
-      <button class="btn-primary" onclick="App.confirmSettle()">Mark as Settled</button>
+    <div class="modal-ftr">
+      <button class="btn-secondary" onclick="Modals.close('modalSettle')">Cancel</button>
+      <button class="btn-primary btn-green" onclick="Actions.confirmSettle()">✓ Mark as Settled</button>
     </div>
   </div>
 </div>
